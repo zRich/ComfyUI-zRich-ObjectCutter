@@ -109,8 +109,10 @@ class ZRichObjectCutter:
                 y2 = clamp_int(y2, 0, H)
                 if x2 <= x1 or y2 <= y1:
                     continue
-                crop = union_rgba[y1:y2, x1:x2, :].astype(np.float32)
-                crop_outputs.append(torch.from_numpy(crop).unsqueeze(0))
+                # 每个 bbox 输出与原图同尺寸的透明图，只在框区域拷贝像素
+                canvas = np.zeros((H, W, 4), dtype=np.float32)
+                canvas[y1:y2, x1:x2, :] = union_rgba[y1:y2, x1:x2, :].astype(np.float32)
+                crop_outputs.append(torch.from_numpy(canvas).unsqueeze(0))
 
         if crop_outputs:
             crops_batch = torch.cat(crop_outputs, dim=0)
