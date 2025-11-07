@@ -73,11 +73,14 @@ class ZRichObjectCutter:
         except Exception:
             boxes_for_split = []
 
-        # 若有框，则按框生成全尺寸掩码（掩码与原图尺寸一致，仅保留框内像素）
+        # 若有框，则按框生成全尺寸掩码（掩码与原图尺寸一致，仅保留框内像素），并排除交叉区域
+        # 规则：按框顺序赋予像素归属，同一像素只归属于第一个覆盖它的框
         if len(boxes_for_split) > 0:
             def clamp_int(v, lo, hi):
                 return int(max(lo, min(hi, v)))
             split_masks = []
+            assigned = np.zeros((H, W), dtype=np.uint8)  # 已分配像素标记（0/1）
+            union_alpha_for_split_bin = (union_alpha_for_split > 0.5).astype(np.uint8)
             for bx in boxes_for_split:
                 x1, y1, x2, y2 = bx
                 x1 = clamp_int(x1, 0, W)
@@ -86,9 +89,16 @@ class ZRichObjectCutter:
                 y2 = clamp_int(y2, 0, H)
                 if x2 <= x1 or y2 <= y1:
                     continue
+                # 候选像素：并集掩码中的像素
+                candidate = union_alpha_for_split_bin[y1:y2, x1:x2]
+                # 排除已分配像素，确保不产生交叉
+                exclusive = candidate * (1 - assigned[y1:y2, x1:x2])
+                # 将本框的独占像素写入全尺寸掩码
                 full_mask = np.zeros((H, W), dtype=np.float32)
-                full_mask[y1:y2, x1:x2] = union_alpha_for_split[y1:y2, x1:x2]
+                full_mask[y1:y2, x1:x2] = exclusive.astype(np.float32)
                 split_masks.append(full_mask)
+                # 标记这些像素为已分配
+                assigned[y1:y2, x1:x2] = np.maximum(assigned[y1:y2, x1:x2], exclusive)
             if len(split_masks) > 0:
                 masks_np = np.stack(split_masks, axis=0)
         for i in range(masks_np.shape[0]):
@@ -110,39 +120,16 @@ class ZRichObjectCutter:
         # 第一路输出：每个 mask 的整幅透明抠图
         per_mask_rgba = torch.cat(outputs, dim=0)  # (N, H, W, 4)
 
-        # 第二路输出：如果提供了 bboxes，则按框从合成图裁剪；否则复用第一路
-        # 合成图：掩码并集后的整体抠图（避免多对象被覆盖为黑）
-        union_alpha = np.zeros((H, W), dtype=np.float32)
-        for i in range(masks_np.shape[0]):
-            union_alpha = np.maximum(union_alpha, (masks_np[i] > 0.5).astype(np.float32))
-        union_rgb = src * union_alpha[..., None]
-        union_rgba = np.concatenate([union_rgb, union_alpha[..., None]], axis=-1)  # (H,W,4)
-
+        # 第二路输出：如果提供了 bboxes，则按框输出只包含该框独占像素的全尺寸透明图
         crop_outputs = []
         def clamp_int(v, lo, hi):
             return int(max(lo, min(hi, v)))
 
-        # 解析 bboxes：支持 [ [x1,y1,x2,y2], ... ] 或按批次嵌套结构
-        boxes = []
-        try:
-            # torch/numpy/list 统一为 Python 列表
-            if isinstance(bboxes, torch.Tensor):
-                bb = bboxes.detach().cpu().numpy()
-            else:
-                bb = np.array(bboxes, dtype=np.int64)
-            # 尝试展平到 (M,4)
-            if bb.ndim == 1 and bb.shape[0] == 4:
-                boxes = [bb.tolist()]
-            elif bb.ndim >= 2:
-                # 如果是按批次嵌套，则取第一维的所有框或直接重塑到 (-1,4)
-                reshaped = bb.reshape(-1, bb.shape[-1])
-                if reshaped.shape[-1] == 4:
-                    boxes = reshaped.tolist()
-        except Exception:
-            boxes = []
+        # 直接复用 boxes_for_split，确保与 masks_np 的顺序一致
+        boxes = boxes_for_split
 
         if boxes:
-            for bx in boxes:
+            for i, bx in enumerate(boxes):
                 x1, y1, x2, y2 = bx
                 # 边界裁剪并保证有效区域
                 x1 = clamp_int(x1, 0, W)
@@ -151,9 +138,11 @@ class ZRichObjectCutter:
                 y2 = clamp_int(y2, 0, H)
                 if x2 <= x1 or y2 <= y1:
                     continue
-                # 每个 bbox 输出与原图同尺寸的透明图，只在框区域拷贝像素
+                # 使用每个框对应的独占掩码生成 RGBA，并仅在框区域拷贝
+                alpha_i = (masks_np[i] > 0.5).astype(np.float32)
+                rgba_i = np.concatenate([src * alpha_i[..., None], alpha_i[..., None]], axis=-1)
                 canvas = np.zeros((H, W, 4), dtype=np.float32)
-                canvas[y1:y2, x1:x2, :] = union_rgba[y1:y2, x1:x2, :].astype(np.float32)
+                canvas[y1:y2, x1:x2, :] = rgba_i[y1:y2, x1:x2, :].astype(np.float32)
                 crop_outputs.append(torch.from_numpy(canvas).unsqueeze(0))
 
         if crop_outputs:
