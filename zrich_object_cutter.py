@@ -43,12 +43,9 @@ class ZRichObjectCutter:
             masks = []
 
         outputs = []
+        # 始终使用第一张原图进行抠图；对每个 mask 输出一张透明图
+        src = img_np[0]
         for i, m in enumerate(masks):
-            # 选择对应图像；若 mask 数量与图像批次一致则一一对应，否则默认使用第 0 张原图
-            if len(masks) == B:
-                src = img_np[i]
-            else:
-                src = img_np[0]
 
             # 二值化掩码并做透明背景
             alpha = (m > 0.5).astype(np.float32)
