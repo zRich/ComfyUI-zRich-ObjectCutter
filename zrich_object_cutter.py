@@ -49,6 +49,48 @@ class ZRichObjectCutter:
         outputs = []
         # 始终使用第一张原图进行抠图；对每个 mask 输出一张透明图
         src = img_np[0]  # (H, W, C)
+
+        # 如果提供了 bboxes，则依据每个框把原始掩码“拆分”为多个全尺寸掩码：仅保留框内像素
+        # 构建并集掩码，作为拆分的基底
+        union_alpha_for_split = np.zeros((H, W), dtype=np.float32)
+        if masks_np.shape[0] > 0:
+            for i in range(masks_np.shape[0]):
+                union_alpha_for_split = np.maximum(union_alpha_for_split, (masks_np[i] > 0.5).astype(np.float32))
+
+        # 解析 bboxes：支持 [ [x1,y1,x2,y2], ... ] 或按批次嵌套结构
+        boxes_for_split = []
+        try:
+            if isinstance(bboxes, torch.Tensor):
+                bb = bboxes.detach().cpu().numpy()
+            else:
+                bb = np.array(bboxes, dtype=np.int64)
+            if bb.ndim == 1 and bb.shape[0] == 4:
+                boxes_for_split = [bb.tolist()]
+            elif bb.ndim >= 2:
+                reshaped = bb.reshape(-1, bb.shape[-1])
+                if reshaped.shape[-1] == 4:
+                    boxes_for_split = reshaped.tolist()
+        except Exception:
+            boxes_for_split = []
+
+        # 若有框，则按框生成全尺寸掩码（掩码与原图尺寸一致，仅保留框内像素）
+        if len(boxes_for_split) > 0:
+            def clamp_int(v, lo, hi):
+                return int(max(lo, min(hi, v)))
+            split_masks = []
+            for bx in boxes_for_split:
+                x1, y1, x2, y2 = bx
+                x1 = clamp_int(x1, 0, W)
+                x2 = clamp_int(x2, 0, W)
+                y1 = clamp_int(y1, 0, H)
+                y2 = clamp_int(y2, 0, H)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                full_mask = np.zeros((H, W), dtype=np.float32)
+                full_mask[y1:y2, x1:x2] = union_alpha_for_split[y1:y2, x1:x2]
+                split_masks.append(full_mask)
+            if len(split_masks) > 0:
+                masks_np = np.stack(split_masks, axis=0)
         for i in range(masks_np.shape[0]):
             m = masks_np[i]
 
