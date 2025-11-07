@@ -6,8 +6,8 @@ import torch
 class ZRichObjectCutter:
     """
     🧩 ZRich Object Cutter
-    将图片中的物体（通过 bbox 定位）裁剪成与原图同尺寸的透明图像。
-    可直接输出给 Preview Image / Save Image 节点。
+    将图片中的物体（通过 MASK 或 bbox）抠图为与原图同尺寸的透明图像。
+    现在支持直接接收 SAM2 的 MASK 输出，逐个区域生成透明背景 RGBA 图片。
     """
 
     @classmethod
@@ -15,17 +15,9 @@ class ZRichObjectCutter:
         return {
             "required": {
                 "image": ("IMAGE",),
-                # 与 Florence2Run 的 data 类型一致，支持直接传入其 JSON 输出
-                "data": ("JSON",),
+                # 直接接收 Sam2Segmentation 的输出 MASK
+                "mask": ("MASK",),
             },
-            "optional": {
-                "padding": ("FLOAT", {
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 0.2,
-                    "step": 0.01
-                }),
-            }
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -33,67 +25,43 @@ class ZRichObjectCutter:
     FUNCTION = "cut_objects"
     CATEGORY = "zRich/Segmentation"
 
-    # 裁剪物体并返回透明图像
-    def cut_objects(self, image, data, padding=0.0):
-        # Convert image tensor → PIL
-        image_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
-        img_pil = Image.fromarray(image_np)
-        width, height = img_pil.size
+    # 基于 MASK 抠图并返回透明 RGBA 图像（尺寸与原图一致）
+    def cut_objects(self, image, mask):
+        # 输入 image: (B, H, W, C) 浮点 0..1；mask: (N, H, W) 或 (H, W)
+        img_np = image.cpu().numpy().astype(np.float32)  # 保持 0..1
+        B, H, W, C = img_np.shape
 
-        images = []
+        mask_np = mask.cpu().numpy()
 
-        # 兼容 Florence2Run 的 JSON 输出与 Florence2toCoordinates 的输入格式
-        # data 可能是：
-        # - JSON 字符串（包含 list 或 dict）
-        # - Python 列表（[[x1,y1,x2,y2], ...] 或 [ {"bboxes": [...]}, ... ]）
-        # - Python 字典（{"bboxes": [...] }）
-        parsed = data
-        if isinstance(parsed, str):
-            try:
-                parsed = json.loads(parsed.replace("'", '"'))
-            except Exception:
-                # 如果不是有效 JSON，则当作空处理
-                parsed = []
-
-        # 提取 bboxes 列表
-        bboxes = []
-        if isinstance(parsed, dict) and "bboxes" in parsed:
-            bboxes = parsed["bboxes"]
-        elif isinstance(parsed, list):
-            # 如果是列表且第一个元素是 dict，则取其中的 bboxes（兼容 batch 情况，默认取第一个）
-            if len(parsed) > 0 and isinstance(parsed[0], dict) and "bboxes" in parsed[0]:
-                bboxes = parsed[0]["bboxes"]
-            else:
-                # 否则假设就是 [[x1,y1,x2,y2], ...]
-                bboxes = parsed
+        # 统一为列表形式的掩码
+        masks = []
+        if mask_np.ndim == 2:
+            masks = [mask_np]
+        elif mask_np.ndim == 3:
+            masks = [mask_np[i] for i in range(mask_np.shape[0])]
         else:
-            bboxes = []
+            masks = []
 
-        for i, box in enumerate(bboxes):
-            x1, y1, x2, y2 = [float(v) for v in box]
+        outputs = []
+        for i, m in enumerate(masks):
+            # 选择对应图像；若 mask 数量与图像批次一致则一一对应，否则默认使用第 0 张原图
+            if len(masks) == B:
+                src = img_np[i]
+            else:
+                src = img_np[0]
 
-            # Add padding
-            pad_w = (x2 - x1) * padding
-            pad_h = (y2 - y1) * padding
-            x1 = max(0, int(x1 - pad_w))
-            y1 = max(0, int(y1 - pad_h))
-            x2 = min(width, int(x2 + pad_w))
-            y2 = min(height, int(y2 + pad_h))
+            # 二值化掩码并做透明背景
+            alpha = (m > 0.5).astype(np.float32)
+            rgb = src * alpha[..., None]
+            rgba = np.concatenate([rgb, alpha[..., None]], axis=-1)
 
-            # Transparent canvas same size as original
-            transparent = Image.new("RGBA", img_pil.size, (0, 0, 0, 0))
-            crop = img_pil.crop((x1, y1, x2, y2)).convert("RGBA")
-            transparent.paste(crop, (x1, y1))
+            tensor_img = torch.from_numpy(rgba)[None,]
+            outputs.append(tensor_img)
 
-            # Convert back to tensor
-            np_img = np.array(transparent).astype(np.float32) / 255.0
-            tensor_img = torch.from_numpy(np_img)[None,]
-            images.append(tensor_img)
+        if len(outputs) == 0:
+            # 如果没有掩码，输出一张透明图（与第一张原图同尺寸）
+            blank = np.zeros((H, W, 4), dtype=np.float32)
+            return (torch.from_numpy(blank)[None,],)
 
-        if len(images) == 0:
-            blank = Image.new("RGBA", img_pil.size, (0, 0, 0, 0))
-            np_blank = np.array(blank).astype(np.float32) / 255.0
-            return (torch.from_numpy(np_blank)[None,],)
-
-        result = torch.cat(images, dim=0)
+        result = torch.cat(outputs, dim=0)
         return (result,)

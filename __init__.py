@@ -5,5 +5,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "zRichObjectCutter": "🧩 zRich Object Cutter (BBox to Transparent)"
+    "zRichObjectCutter": "🧩 zRich Object Cutter (MASK to Transparent)"
 }
