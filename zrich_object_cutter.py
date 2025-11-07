@@ -1,3 +1,4 @@
+import json
 import numpy as np
 from PIL import Image
 import torch
@@ -14,7 +15,8 @@ class ZRichObjectCutter:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "bboxes": ("LIST",),  # [[x1,y1,x2,y2], ...]
+                # 与 Florence2Run 的 data 类型一致，支持直接传入其 JSON 输出
+                "data": ("JSON",),
             },
             "optional": {
                 "padding": ("FLOAT", {
@@ -27,17 +29,45 @@ class ZRichObjectCutter:
         }
 
     RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("objects",)
+    RETURN_NAMES = ("images",)
     FUNCTION = "cut_objects"
-    CATEGORY = "ZRich/Segmentation"
+    CATEGORY = "zRich/Segmentation"
 
-    def cut_objects(self, image, bboxes, padding=0.0):
+    # 裁剪物体并返回透明图像
+    def cut_objects(self, image, data, padding=0.0):
         # Convert image tensor → PIL
         image_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
         img_pil = Image.fromarray(image_np)
         width, height = img_pil.size
 
-        objects = []
+        images = []
+
+        # 兼容 Florence2Run 的 JSON 输出与 Florence2toCoordinates 的输入格式
+        # data 可能是：
+        # - JSON 字符串（包含 list 或 dict）
+        # - Python 列表（[[x1,y1,x2,y2], ...] 或 [ {"bboxes": [...]}, ... ]）
+        # - Python 字典（{"bboxes": [...] }）
+        parsed = data
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed.replace("'", '"'))
+            except Exception:
+                # 如果不是有效 JSON，则当作空处理
+                parsed = []
+
+        # 提取 bboxes 列表
+        bboxes = []
+        if isinstance(parsed, dict) and "bboxes" in parsed:
+            bboxes = parsed["bboxes"]
+        elif isinstance(parsed, list):
+            # 如果是列表且第一个元素是 dict，则取其中的 bboxes（兼容 batch 情况，默认取第一个）
+            if len(parsed) > 0 and isinstance(parsed[0], dict) and "bboxes" in parsed[0]:
+                bboxes = parsed[0]["bboxes"]
+            else:
+                # 否则假设就是 [[x1,y1,x2,y2], ...]
+                bboxes = parsed
+        else:
+            bboxes = []
 
         for i, box in enumerate(bboxes):
             x1, y1, x2, y2 = [float(v) for v in box]
@@ -58,12 +88,12 @@ class ZRichObjectCutter:
             # Convert back to tensor
             np_img = np.array(transparent).astype(np.float32) / 255.0
             tensor_img = torch.from_numpy(np_img)[None,]
-            objects.append(tensor_img)
+            images.append(tensor_img)
 
-        if len(objects) == 0:
+        if len(images) == 0:
             blank = Image.new("RGBA", img_pil.size, (0, 0, 0, 0))
             np_blank = np.array(blank).astype(np.float32) / 255.0
             return (torch.from_numpy(np_blank)[None,],)
 
-        result = torch.cat(objects, dim=0)
+        result = torch.cat(images, dim=0)
         return (result,)

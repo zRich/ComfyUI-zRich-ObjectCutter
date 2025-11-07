@@ -1,9 +1,9 @@
 from .zrich_object_cutter import ZRichObjectCutter
 
 NODE_CLASS_MAPPINGS = {
-    "ZRichObjectCutter": ZRichObjectCutter
+    "zRichObjectCutter": ZRichObjectCutter
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ZRichObjectCutter": "🧩 ZRich Object Cutter (BBox to Transparent)"
+    "zRichObjectCutter": "🧩 zRich Object Cutter (BBox to Transparent)"
 }
