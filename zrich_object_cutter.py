@@ -18,9 +18,7 @@ class ZRichObjectCutter:
                 "image": ("IMAGE",),
                 # 直接接收 Sam2Segmentation 的输出 MASK
                 "mask": ("MASK",),
-            },
-            "optional": {
-                # 可选的框列表，用于在掩码抠图合成后按框裁剪
+                # 改为必填，与 Florence2toCoordinates 的 BBOX 输出一致
                 "bboxes": ("BBOX",),
             },
         }
@@ -31,7 +29,7 @@ class ZRichObjectCutter:
     CATEGORY = "zRich/Segmentation"
 
     # 基于 MASK 抠图并返回透明 RGBA 图像（尺寸与原图一致）
-    def cut_objects(self, image, mask, bboxes=None):
+    def cut_objects(self, image, mask, bboxes):
         # 输入 image: (B, H, W, C) 浮点 0..1；mask: (..., H, W)
         img_np = image.detach().cpu().numpy().astype(np.float32)  # 保持 0..1
         B, H, W, C = img_np.shape
@@ -84,23 +82,22 @@ class ZRichObjectCutter:
 
         # 解析 bboxes：支持 [ [x1,y1,x2,y2], ... ] 或按批次嵌套结构
         boxes = []
-        if bboxes is not None:
-            try:
-                # torch/numpy/list 统一为 Python 列表
-                if isinstance(bboxes, torch.Tensor):
-                    bb = bboxes.detach().cpu().numpy()
-                else:
-                    bb = np.array(bboxes, dtype=np.int64)
-                # 尝试展平到 (M,4)
-                if bb.ndim == 1 and bb.shape[0] == 4:
-                    boxes = [bb.tolist()]
-                elif bb.ndim >= 2:
-                    # 如果是按批次嵌套，则取第一维的所有框或直接重塑到 (-1,4)
-                    reshaped = bb.reshape(-1, bb.shape[-1])
-                    if reshaped.shape[-1] == 4:
-                        boxes = reshaped.tolist()
-            except Exception:
-                boxes = []
+        try:
+            # torch/numpy/list 统一为 Python 列表
+            if isinstance(bboxes, torch.Tensor):
+                bb = bboxes.detach().cpu().numpy()
+            else:
+                bb = np.array(bboxes, dtype=np.int64)
+            # 尝试展平到 (M,4)
+            if bb.ndim == 1 and bb.shape[0] == 4:
+                boxes = [bb.tolist()]
+            elif bb.ndim >= 2:
+                # 如果是按批次嵌套，则取第一维的所有框或直接重塑到 (-1,4)
+                reshaped = bb.reshape(-1, bb.shape[-1])
+                if reshaped.shape[-1] == 4:
+                    boxes = reshaped.tolist()
+        except Exception:
+            boxes = []
 
         if boxes:
             for bx in boxes:
